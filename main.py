@@ -6,15 +6,15 @@ import pytesseract
 import re
 import io
 
-# Create FastAPI app
-app = FastAPI(title="OCR Microservice", description="Extracts PCN details from images and PDFs", version="1.0.0")
+app = FastAPI(
+    title="OCR Microservice",
+    description="Extracts PCN details from images and PDFs",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
 
-# --- Health Check / Root Route ---
-@app.get("/")
-def home():
-    return {"status": "ok", "message": "OCR microservice is running"}
 
-# --- Helper Function: Extract fields from OCR text ---
 def extract_fields(text: str) -> dict:
     # Basic regex extraction logic (can be improved over time)
     vrm_match = re.search(r"\b[A-Z]{2}[0-9]{2}[A-Z]{3}\b", text)
@@ -24,25 +24,30 @@ def extract_fields(text: str) -> dict:
     return {
         "vrm": vrm_match.group(0) if vrm_match else None,
         "contravention_date": date_match.group(0) if date_match else None,
-        "location": None,   # Placeholder for NLP/geolocation improvements
-        "authority": None,  # Placeholder for matching known authorities
+        "location": None,  # Can be improved with NLP/geolocation list
+        "authority": None,  # Can be improved by matching known authorities
         "contravention_code": contravention_code_match.group(0) if contravention_code_match else None,
     }
 
-# --- OCR Endpoint ---
+
+# ✅ Health check endpoint (works with both GET and HEAD)
+@app.get("/", include_in_schema=False)
+@app.head("/", include_in_schema=False)
+def home():
+    return {"status": "ok", "message": "OCR microservice is running"}
+
+
 @app.post("/ocr")
 async def ocr_extract(file: UploadFile = File(...)):
     try:
         content = await file.read()
 
-        # Convert PDFs to images, otherwise process as image
         if file.filename.lower().endswith(".pdf"):
             images = convert_from_bytes(content)
         else:
             image = Image.open(io.BytesIO(content))
             images = [image]
 
-        # Run OCR on all pages/images
         text = ""
         for img in images:
             text += pytesseract.image_to_string(img)
