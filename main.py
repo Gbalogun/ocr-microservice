@@ -36,53 +36,71 @@ CONTRAVENTION_TYPES = {
 }
 
 def extract_fields(text: str) -> dict:
-    # PCN number
-    pcn_match = re.search(r"(PCN|Reference)\s*[:\-]?\s*([A-Z0-9]+)", text, re.IGNORECASE)
-
-    # Contravention code
-    contravention_code_match = re.search(r"\b\d{2}[A-Z]?\b", text)
-    contravention_code = contravention_code_match.group(0) if contravention_code_match else None
-
-    # Contravention type mapped
-    contravention_type = CONTRAVENTION_TYPES.get(contravention_code, None)
-
-    # Fine amounts with context
-    fine_amount_discounted = None
-    fine_amount_full = None
-    for line in text.splitlines():
-        if "discount" in line.lower():
-            match = re.search(r"£\s?(\d+(?:\.\d{2})?)", line)
-            if match:
-                fine_amount_discounted = float(match.group(1))
-        elif any(keyword in line.lower() for keyword in ["full", "amount due", "total"]):
-            match = re.search(r"£\s?(\d+(?:\.\d{2})?)", line)
-            if match:
-                fine_amount_full = float(match.group(1))
-
-    # If still missing, fallback to min/max
-    if not (fine_amount_discounted and fine_amount_full):
-        fine_amounts = re.findall(r"£\s?(\d+(?:\.\d{2})?)", text)
-        if fine_amounts:
-            amounts = sorted(set(float(a) for a in fine_amounts))
-            if len(amounts) >= 2:
-                fine_amount_discounted = fine_amount_discounted or amounts[0]
-                fine_amount_full = fine_amount_full or amounts[-1]
-            elif len(amounts) == 1:
-                fine_amount_full = fine_amount_full or amounts[0]
-
-    # Due date for payment
-    due_date_match = re.search(r"BY\s+(\d{2}/\d{2}/\d{4})", text)
-    due_date = due_date_match.group(1) if due_date_match else None
-
-    return {
-        "pcn_number": pcn_match.group(2) if pcn_match else None,
-        "contravention_code": contravention_code,
-        "contravention_type": contravention_type,
-        "fine_amount_discounted": fine_amount_discounted,
-        "fine_amount_full": fine_amount_full,
-        "due_date": due_date,
-        # ... (rest stays same: vrm, authority, location, etc.)
+    lines = text.splitlines()
+    data = {
+        "pcn_number": None,
+        "vrm": None,
+        "contravention_date": None,
+        "contravention_code": None,
+        "contravention_type": None,
+        "location": None,
+        "authority": None,
+        "fine_amount_discounted": None,
+        "fine_amount_full": None,
+        "due_date": None,
     }
+
+    for i, line in enumerate(lines):
+        lower_line = line.lower()
+
+        # 🔹 PCN Number / Reference
+        if any(k in lower_line for k in ["pcn", "reference", "ref", "number"]):
+            match = re.search(r"[A-Z0-9]{6,}", line)
+            if match:
+                data["pcn_number"] = match.group(0)
+
+        # 🔹 Vehicle Registration
+        if any(k in lower_line for k in ["vehicle", "registration", "vrm", "plate"]):
+            match = re.search(r"\b[A-Z]{2}[0-9]{2}[A-Z]{3}\b", line)
+            if match:
+                data["vrm"] = match.group(0)
+
+        # 🔹 Dates (issue/contravention/due)
+        if any(k in lower_line for k in ["date", "issue", "offence", "contravention", "payment", "by"]):
+            match = re.search(r"\d{2}/\d{2}/\d{4}", line)
+            if match:
+                if "payment" in lower_line or "by" in lower_line:
+                    data["due_date"] = match.group(0)
+                else:
+                    data["contravention_date"] = match.group(0)
+
+        # 🔹 Contravention
+        if any(k in lower_line for k in ["contravention", "reason", "offence"]):
+            code_match = re.search(r"\b\d{2}[A-Z]?\b", line)
+            if code_match:
+                code = code_match.group(0)
+                data["contravention_code"] = code
+                data["contravention_type"] = CONTRAVENTION_TYPES.get(code, line.strip())
+
+        # 🔹 Location
+        if any(k in lower_line for k in ["location", "place", "street", "road", "car park"]):
+            data["location"] = line.split(":")[-1].strip()
+
+        # 🔹 Authority
+        if any(k in lower_line for k in ["authority", "council", "borough", "ltd", "company"]):
+            data["authority"] = line.strip()
+
+        # 🔹 Fine Amounts
+        if "£" in line:
+            matches = re.findall(r"£\s?(\d+(?:\.\d{2})?)", line)
+            for amt in matches:
+                amount = float(amt)
+                if "discount" in lower_line or "within 14" in lower_line:
+                    data["fine_amount_discounted"] = amount
+                else:
+                    data["fine_amount_full"] = max(data["fine_amount_full"] or 0, amount)
+
+    return data
 
 
 @app.post("/ocr")
