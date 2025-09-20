@@ -7,25 +7,20 @@ import pytesseract
 import re
 import io
 
-app = FastAPI(
-    title="OCR Microservice",
-    version="1.0.0",
-    description="Extracts PCN details from images and PDFs"
-)
+app = FastAPI()
 
-# ✅ Allow Swagger + browser requests
-origins = [
-    "*",  # allow all origins for now
-]
-
+# Fix CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # allow all origins for now
+    allow_origins=["*"],  # allow all origins
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+@app.get("/")
+def home():
+    return {"status": "ok", "message": "OCR microservice is running"}
 
 def extract_fields(text: str) -> dict:
     vrm_match = re.search(r"\b[A-Z]{2}[0-9]{2}[A-Z]{3}\b", text)
@@ -40,12 +35,6 @@ def extract_fields(text: str) -> dict:
         "contravention_code": contravention_code_match.group(0) if contravention_code_match else None,
     }
 
-
-@app.get("/")
-async def home():
-    return {"status": "ok", "message": "OCR microservice is running"}
-
-
 @app.post("/ocr")
 async def ocr_extract(file: UploadFile = File(...)):
     try:
@@ -57,10 +46,7 @@ async def ocr_extract(file: UploadFile = File(...)):
             image = Image.open(io.BytesIO(content))
             images = [image]
 
-        text = ""
-        for img in images:
-            text += pytesseract.image_to_string(img)
-
+        text = "".join(pytesseract.image_to_string(img) for img in images)
         extracted = extract_fields(text)
         return JSONResponse(content=extracted)
 
