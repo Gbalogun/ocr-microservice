@@ -47,6 +47,7 @@ def extract_fields(text: str) -> dict:
         "authority": None,
         "fine_amount_discounted": None,
         "fine_amount_full": None,
+        "discount_deadline": None,
         "due_date": None,
     }
 
@@ -54,8 +55,8 @@ def extract_fields(text: str) -> dict:
         lower_line = line.lower()
 
         # 🔹 PCN Number / Reference
-        if any(k in lower_line for k in ["pcn reference", "reference no.", "ref","reference number"]):
-            match = re.search(r"[A-Z0-9]{6,}", line)
+        if any(k in lower_line for k in ["pcn reference", "reference no.", "reference number", "pcn number", "ref"]):
+            match = re.search(r"[A-Z0-9]{5,}", line)
             if match:
                 data["pcn_number"] = match.group(0)
 
@@ -65,14 +66,15 @@ def extract_fields(text: str) -> dict:
             if match:
                 data["vrm"] = match.group(0)
 
-        # 🔹 Dates (issue/contravention/due)
-        if any(k in lower_line for k in ["date", "issue", "offence", "contravention", "payment", "by"]):
-            match = re.search(r"\d{2}/\d{2}/\d{4}", line)
-            if match:
-                if "payment" in lower_line or "by" in lower_line:
-                    data["due_date"] = match.group(0)
-                else:
-                    data["contravention_date"] = match.group(0)
+        # 🔹 Dates (issue/contravention/payment/due)
+        date_match = re.findall(r"\d{2}/\d{2}/\d{4}", line)
+        if date_match:
+            if "payment" in lower_line or "within 28" in lower_line or "by" in lower_line:
+                data["due_date"] = date_match[0]
+            elif "within 14" in lower_line or "discount" in lower_line:
+                data["discount_deadline"] = date_match[0]
+            else:
+                data["contravention_date"] = date_match[0]
 
         # 🔹 Contravention
         if any(k in lower_line for k in ["contravention", "reason", "offence"]):
@@ -86,19 +88,25 @@ def extract_fields(text: str) -> dict:
         if any(k in lower_line for k in ["location"]):
             data["location"] = line.split(":")[-1].strip()
 
-        # 🔹 Authority
-        if any(k in lower_line for k in ["authority", "council", "borough", "ltd"]):
+        # 🔹 Authority (councils, boroughs, ltd companies)
+        if any(k in lower_line for k in ["authority", "council", "borough", "ltd", "limited"]):
             data["authority"] = line.strip()
 
         # 🔹 Fine Amounts
         if "£" in line:
-            matches = re.findall(r"£\s?(\d+(?:\.\d{2})?)", line)
-            for amt in matches:
+            amounts = re.findall(r"£\s?(\d+(?:\.\d{2})?)", line)
+            for amt in amounts:
                 amount = float(amt)
                 if "discount" in lower_line or "within 14" in lower_line:
                     data["fine_amount_discounted"] = amount
+                elif "amount due" in lower_line or "full" in lower_line or "within 28" in lower_line:
+                    data["fine_amount_full"] = amount
                 else:
-                    data["fine_amount_full"] = max(data["fine_amount_full"] or 0, amount)
+                    # Fallback: if two numbers exist, assume smaller = discounted, larger = full
+                    if data["fine_amount_full"] is None or amount > data["fine_amount_full"]:
+                        data["fine_amount_full"] = amount
+                    elif data["fine_amount_discounted"] is None or amount < data["fine_amount_full"]:
+                        data["fine_amount_discounted"] = amount
 
     return data
 
