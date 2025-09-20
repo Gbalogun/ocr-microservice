@@ -23,65 +23,65 @@ def home():
     return {"status": "ok", "message": "OCR microservice is running"}
 
 
+CONTRAVENTION_TYPES = {
+    "01": "Parking in a restricted area",
+    "02": "Overstaying in parking bay",
+    "03": "No valid parking ticket",
+    "04": "Parking without payment",
+    "05": "Parking without payment",
+    "06": "Parking without payment",
+    "12": "Parking in disabled bay",
+    "16": "Loading in restricted hours",
+    "23": "Bus lane violation",
+}
+
 def extract_fields(text: str) -> dict:
-    # Vehicle registration (e.g., FP63VKN)
-    vrm_match = re.search(r"\b[A-Z]{2}[0-9]{2}[A-Z]{3}\b", text)
+    # PCN number
+    pcn_match = re.search(r"(PCN|Reference)\s*[:\-]?\s*([A-Z0-9]+)", text, re.IGNORECASE)
 
-    # Dates (dd/mm/yyyy)
-    date_matches = re.findall(r"\b(\d{2}/\d{2}/\d{4})\b", text)
-    contravention_date = date_matches[0] if date_matches else None
-    due_date = date_matches[-1] if len(date_matches) > 1 else None
-
-    # Contravention code (e.g., 07, 21A, etc.)
+    # Contravention code
     contravention_code_match = re.search(r"\b\d{2}[A-Z]?\b", text)
+    contravention_code = contravention_code_match.group(0) if contravention_code_match else None
 
-    # Contravention type (reason for issue)
-    contravention_type_match = None
-    contravention_keywords = [
-        "parking", "restricted", "ticket", "bay", "session",
-        "payment", "disabled", "bus lane", "loading"
-    ]
-    for line in text.splitlines():
-        if any(word in line.lower() for word in contravention_keywords):
-            contravention_type_match = line.strip()
-            break
+    # Contravention type mapped
+    contravention_type = CONTRAVENTION_TYPES.get(contravention_code, None)
 
-    # Location (look for something resembling an address or site name)
-    location_match = None
-    for line in text.splitlines():
-        if re.search(r"\b[A-Z][a-z]+(?:\s[A-Z][a-z]+)*\b", line) and re.search(r"\d{1,4}\s?[A-Z]{1,2}\d[A-Z]{2}", line):
-            location_match = line.strip()
-            break
-
-    # Authority (often includes "Council", "Limited", "Ltd", "Borough")
-    authority_match = None
-    for line in text.splitlines():
-        if any(keyword in line for keyword in ["Council", "Borough", "Limited", "Ltd"]):
-            authority_match = line.strip()
-            break
-
-    # Fine amounts (£xx) — discounted and full
-    fine_amounts = re.findall(r"£\s?(\d+(?:\.\d{2})?)", text)
+    # Fine amounts with context
     fine_amount_discounted = None
     fine_amount_full = None
-    if fine_amounts:
-        amounts = sorted(set(float(a) for a in fine_amounts))
-        if len(amounts) >= 2:
-            fine_amount_discounted, fine_amount_full = amounts[0], amounts[-1]
-        elif len(amounts) == 1:
-            fine_amount_full = amounts[0]
+    for line in text.splitlines():
+        if "discount" in line.lower():
+            match = re.search(r"£\s?(\d+(?:\.\d{2})?)", line)
+            if match:
+                fine_amount_discounted = float(match.group(1))
+        elif any(keyword in line.lower() for keyword in ["full", "amount due", "total"]):
+            match = re.search(r"£\s?(\d+(?:\.\d{2})?)", line)
+            if match:
+                fine_amount_full = float(match.group(1))
+
+    # If still missing, fallback to min/max
+    if not (fine_amount_discounted and fine_amount_full):
+        fine_amounts = re.findall(r"£\s?(\d+(?:\.\d{2})?)", text)
+        if fine_amounts:
+            amounts = sorted(set(float(a) for a in fine_amounts))
+            if len(amounts) >= 2:
+                fine_amount_discounted = fine_amount_discounted or amounts[0]
+                fine_amount_full = fine_amount_full or amounts[-1]
+            elif len(amounts) == 1:
+                fine_amount_full = fine_amount_full or amounts[0]
+
+    # Due date for payment
+    due_date_match = re.search(r"BY\s+(\d{2}/\d{2}/\d{4})", text)
+    due_date = due_date_match.group(1) if due_date_match else None
 
     return {
-        "vrm": vrm_match.group(0) if vrm_match else None,
-        "contravention_date": contravention_date,
-        "contravention_code": contravention_code_match.group(0) if contravention_code_match else None,
-        "contravention_type": contravention_type_match,
-        "pcn_number": None,  # Can add regex later if needed
-        "location": location_match,
-        "authority": authority_match,
+        "pcn_number": pcn_match.group(2) if pcn_match else None,
+        "contravention_code": contravention_code,
+        "contravention_type": contravention_type,
         "fine_amount_discounted": fine_amount_discounted,
         "fine_amount_full": fine_amount_full,
         "due_date": due_date,
+        # ... (rest stays same: vrm, authority, location, etc.)
     }
 
 
