@@ -6,6 +6,7 @@ from PIL import Image
 import pytesseract
 import re
 import io
+from datetime import datetime
 
 app = FastAPI()
 
@@ -35,6 +36,14 @@ CONTRAVENTION_TYPES = {
     "23": "Bus lane violation",
 }
 
+def validate_date(date_str: str) -> str | None:
+    """Ensure date is valid UK format DD/MM/YYYY, otherwise return None."""
+    try:
+        d = datetime.strptime(date_str, "%d/%m/%Y")
+        return d.strftime("%d/%m/%Y")
+    except Exception:
+        return None
+
 def extract_fields(text: str) -> dict:
     lines = text.splitlines()
     data = {
@@ -51,62 +60,67 @@ def extract_fields(text: str) -> dict:
         "due_date": None,
     }
 
+    amounts_found = []
+
     for i, line in enumerate(lines):
         lower_line = line.lower()
 
         # 🔹 PCN Number / Reference
-        if any(k in lower_line for k in ["pcn reference:", "reference no.:", "reference number:", "pcn number:", "ref:"]):
-            match = re.search(r"[A-Z0-9]{5,}", line)
+        if any(k in lower_line for k in ["pcn reference", "reference no.", "ref", "reference number"]):
+            match = re.search(r"[A-Z0-9]{6,}", line)
             if match:
                 data["pcn_number"] = match.group(0)
 
         # 🔹 Vehicle Registration
         if any(k in lower_line for k in ["vehicle", "registration", "vrm", "plate"]):
-            match = re.search(r"\b[A-Z]{2}[0-9]{2}[A-Z]{3}\b", line)
+            match = re.search(r"\b[A-Z]{2}[0-9]{2}[A-Z]{3}\b", line.replace(" ", ""))
             if match:
                 data["vrm"] = match.group(0)
 
-        # 🔹 Dates (issue/contravention/payment/due)
-        date_match = re.findall(r"\d{2}/\d{2}/\d{4}", line)
-        if date_match:
-            if "payment" in lower_line or "within 28" in lower_line or "by" in lower_line:
-                data["due_date"] = date_match[0]
-            elif "within 14" in lower_line or "discount" in lower_line:
-                data["discount_deadline"] = date_match[0]
-            else:
-                data["contravention_date"] = date_match[0]
+        # 🔹 Dates (issue/contravention/due/discount)
+        if any(k in lower_line for k in ["date", "issue", "offence", "contravention", "payment", "by", "discount"]):
+            matches = re.findall(r"\d{2}/\d{2}/\d{4}", line)
+            for m in matches:
+                m_valid = validate_date(m)
+                if m_valid:
+                    if "payment" in lower_line or "by" in lower_line:
+                        data["due_date"] = m_valid
+                    elif "discount" in lower_line or "within 14" in lower_line:
+                        data["discount_deadline"] = m_valid
+                    else:
+                        data["contravention_date"] = m_valid
 
         # 🔹 Contravention
         if any(k in lower_line for k in ["contravention", "reason", "offence"]):
-            code_match = re.search(r"\b\d{2}[A-Z]?\b", line)
+            # Fix OCR splitting like "0 3"
+            code_match = re.search(r"\b(\d\s?\d[A-Z]?)\b", line)
             if code_match:
-                code = code_match.group(0)
+                code = code_match.group(1).replace(" ", "")
                 data["contravention_code"] = code
                 data["contravention_type"] = CONTRAVENTION_TYPES.get(code, line.strip())
 
         # 🔹 Location
-        if any(k in lower_line for k in ["location"]):
+        if "location" in lower_line:
             data["location"] = line.split(":")[-1].strip()
 
-        # 🔹 Authority (councils, boroughs, ltd companies)
+        # 🔹 Authority
         if any(k in lower_line for k in ["authority", "council", "borough", "ltd", "limited"]):
             data["authority"] = line.strip()
 
         # 🔹 Fine Amounts
         if "£" in line:
-            amounts = re.findall(r"£\s?(\d+(?:\.\d{2})?)", line)
-            for amt in amounts:
+            matches = re.findall(r"£\s?(\d+(?:\.\d{2})?)", line)
+            for amt in matches:
                 amount = float(amt)
+                amounts_found.append(amount)
                 if "discount" in lower_line or "within 14" in lower_line:
                     data["fine_amount_discounted"] = amount
-                elif "amount due" in lower_line or "full" in lower_line or "within 28" in lower_line:
-                    data["fine_amount_full"] = amount
-                else:
-                    # Fallback: if two numbers exist, assume smaller = discounted, larger = full
-                    if data["fine_amount_full"] is None or amount > data["fine_amount_full"]:
-                        data["fine_amount_full"] = amount
-                    elif data["fine_amount_discounted"] is None or amount < data["fine_amount_full"]:
-                        data["fine_amount_discounted"] = amount
+
+    # Post-process fine amounts
+    if amounts_found:
+        data["fine_amount_full"] = max(amounts_found)
+        if not data["fine_amount_discounted"] and len(amounts_found) > 1:
+            data["fine_amount_discounted"] = min(amounts_found)
 
     return data
 
