@@ -1,86 +1,104 @@
+from fastapi import FastAPI, File, UploadFile
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pdf2image import convert_from_bytes
+from PIL import Image
+import pytesseract
+import re
+import io
+
+app = FastAPI()
+
+# Fix CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # allow all origins
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/")
+def home():
+    return {"status": "ok", "message": "OCR microservice is running"}
+
+
 def extract_fields(text: str) -> dict:
-    low = text.lower()
+    # Vehicle registration (e.g., FP63VKN)
+    vrm_match = re.search(r"\b[A-Z]{2}[0-9]{2}[A-Z]{3}\b", text)
 
-    # --- VRM ---
-    vrm_match = VRM.search(text)
-    vrm = vrm_match.group(0) if vrm_match else None
+    # Dates (dd/mm/yyyy)
+    date_matches = re.findall(r"\b(\d{2}/\d{2}/\d{4})\b", text)
+    contravention_date = date_matches[0] if date_matches else None
+    due_date = date_matches[-1] if len(date_matches) > 1 else None
 
-    # --- Contravention date ---
-    contravention_date = None
-    pref = re.search(r"(?:contravention\s*date|date\s*of\s*contravention)[:\s-]*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})", text, re.IGNORECASE)
-    if pref:
-        contravention_date = pref.group(1)
-    else:
-        m = DATE_DMY.search(text)
-        if m:
-            contravention_date = m.group(1)
+    # Contravention code (e.g., 07, 21A, etc.)
+    contravention_code_match = re.search(r"\b\d{2}[A-Z]?\b", text)
 
-    # --- Contravention code/type ---
-    contravention_code = None
-    contravention_type = None
-    cm = CODE.search(text)
-    if cm:
-        contravention_code = cm.group(0)
-        contravention_type = CONTRAVENTION_TYPES.get(contravention_code, "Other")
-
-    # Override with explicit reason if found
-    contravention_reason = None
+    # Contravention type (reason for issue)
+    contravention_type_match = None
+    contravention_keywords = [
+        "parking", "restricted", "ticket", "bay", "session",
+        "payment", "disabled", "bus lane", "loading"
+    ]
     for line in text.splitlines():
-        rm = REASON.search(line)
-        if rm:
-            contravention_reason = re.split(r"[.\(\[]", rm.group(1).strip())[0].strip()
+        if any(word in line.lower() for word in contravention_keywords):
+            contravention_type_match = line.strip()
             break
-    if contravention_reason:
-        contravention_type = contravention_reason
 
-    # --- PCN number ---
-    pcn_number = None
-    pm = PCN_NO.search(text)
-    if pm:
-        pcn_number = pm.group(1).strip("-")
+    # Location (look for something resembling an address or site name)
+    location_match = None
+    for line in text.splitlines():
+        if re.search(r"\b[A-Z][a-z]+(?:\s[A-Z][a-z]+)*\b", line) and re.search(r"\d{1,4}\s?[A-Z]{1,2}\d[A-Z]{2}", line):
+            location_match = line.strip()
+            break
 
-    # --- Location ---
-    location = None
-    lm = LOCATION.search(text)
-    if lm:
-        location = (lm.group("loc1") or lm.group("loc2") or "").strip(" :-").strip()
-        if len(location) > 120:
-            location = None
+    # Authority (often includes "Council", "Limited", "Ltd", "Borough")
+    authority_match = None
+    for line in text.splitlines():
+        if any(keyword in line for keyword in ["Council", "Borough", "Limited", "Ltd"]):
+            authority_match = line.strip()
+            break
 
-    # --- Authority ---
-    authority = None
-    am = re.search(r"(?:Issued\s*by|Enforcement\s*Authority)[:\s-]*(.+)", text, re.IGNORECASE)
-    if am:
-        authority = re.split(r"[.\n\r]", am.group(1).strip())[0].strip()
-    else:
-        am = AUTHORITY.search(text)
-        if am:
-            authority = am.group(0).strip()
-
-    # --- Fine amounts ---
-    all_amounts = [float(m.group(1).replace(",", "")) for m in MONEY.finditer(text)]
-    fine_amount_discounted = min(all_amounts) if len(all_amounts) >= 2 else None
-    fine_amount_full = max(all_amounts) if all_amounts else None
-
-    # --- Due date for payment ---
-    due_date = None
-    dm = re.search(
-        r"(?:paid\s*by|before|no later than|must be paid by)[:\s-]*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
-        text,
-        re.IGNORECASE,
-    )
-    if dm:
-        due_date = dm.group(1)
+    # Fine amounts (£xx) — discounted and full
+    fine_amounts = re.findall(r"£\s?(\d+(?:\.\d{2})?)", text)
+    fine_amount_discounted = None
+    fine_amount_full = None
+    if fine_amounts:
+        amounts = sorted(set(float(a) for a in fine_amounts))
+        if len(amounts) >= 2:
+            fine_amount_discounted, fine_amount_full = amounts[0], amounts[-1]
+        elif len(amounts) == 1:
+            fine_amount_full = amounts[0]
 
     return {
-        "vrm": vrm,
+        "vrm": vrm_match.group(0) if vrm_match else None,
         "contravention_date": contravention_date,
-        "contravention_code": contravention_code,
-        "contravention_type": contravention_type,
-        "pcn_number": pcn_number,
-        "location": location,
-        "authority": authority,
+        "contravention_code": contravention_code_match.group(0) if contravention_code_match else None,
+        "contravention_type": contravention_type_match,
+        "pcn_number": None,  # Can add regex later if needed
+        "location": location_match,
+        "authority": authority_match,
         "fine_amount_discounted": fine_amount_discounted,
         "fine_amount_full": fine_amount_full,
         "due_date": due_date,
     }
+
+
+@app.post("/ocr")
+async def ocr_extract(file: UploadFile = File(...)):
+    try:
+        content = await file.read()
+
+        if file.filename.lower().endswith(".pdf"):
+            images = convert_from_bytes(content)
+        else:
+            image = Image.open(io.BytesIO(content))
+            images = [image]
+
+        text = "".join(pytesseract.image_to_string(img) for img in images)
+        extracted = extract_fields(text)
+        return JSONResponse(content=extracted)
+
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
