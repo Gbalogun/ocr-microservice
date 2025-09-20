@@ -55,7 +55,7 @@ def extract_fields(text: str) -> dict:
         lower_line = line.lower()
 
         # 🔹 PCN Number / Reference
-        if any(k in lower_line for k in ["pcn reference", "reference no.", "reference number", "pcn number", "ref"]):
+        if any(k in lower_line for k in ["pcn reference:", "reference no.:", "reference number:", "pcn number:", "ref:"]):
             match = re.search(r"[A-Z0-9]{5,}", line)
             if match:
                 data["pcn_number"] = match.group(0)
