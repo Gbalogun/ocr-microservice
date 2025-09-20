@@ -54,7 +54,7 @@ def extract_fields(text: str) -> dict:
         lower_line = line.lower()
 
         # 🔹 PCN Number / Reference
-        if any(k in lower_line for k in ["pcn", "reference", "ref","refernce number", "number"]):
+        if any(k in lower_line for k in ["pcn reference", "reference no.", "ref","refernce number"]):
             match = re.search(r"[A-Z0-9]{6,}", line)
             if match:
                 data["pcn_number"] = match.group(0)
@@ -83,11 +83,11 @@ def extract_fields(text: str) -> dict:
                 data["contravention_type"] = CONTRAVENTION_TYPES.get(code, line.strip())
 
         # 🔹 Location
-        if any(k in lower_line for k in ["location", "place", "street", "road", "car park"]):
+        if any(k in lower_line for k in ["location"]):
             data["location"] = line.split(":")[-1].strip()
 
         # 🔹 Authority
-        if any(k in lower_line for k in ["authority", "council", "borough", "ltd", "company"]):
+        if any(k in lower_line for k in ["authority", "council", "borough", "ltd"]):
             data["authority"] = line.strip()
 
         # 🔹 Fine Amounts
