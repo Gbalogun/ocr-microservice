@@ -6,7 +6,7 @@ from PIL import Image
 import pytesseract
 import re
 import io
-from datetime import datetime
+from datetime import datetime 
 
 app = FastAPI()
 
