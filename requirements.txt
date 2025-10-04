@@ -8,3 +8,4 @@ pdf2image
 python-multipart
 pymupdf==1.24.8
 opencv-python-headless
+numpy
