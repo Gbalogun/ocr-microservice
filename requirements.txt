@@ -9,3 +9,4 @@ python-multipart
 pymupdf==1.24.8
 opencv-python-headless
 numpy
+openai>=1.12.0
