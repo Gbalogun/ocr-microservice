@@ -14,6 +14,19 @@ load_dotenv()
 
 app = FastAPI()
 
+# ✅ Allow CORS for frontend access
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/")
+def home():
+    return {"status": "ok", "message": "OCR microservice is running"}
+
 # Initialize OpenAI client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
