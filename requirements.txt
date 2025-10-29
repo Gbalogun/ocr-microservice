@@ -4,3 +4,4 @@ pillow
 pytesseract
 openai
 python-multipart
+python-dotenv
