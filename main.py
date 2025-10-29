@@ -185,42 +185,32 @@ async def ocr_extract(file: UploadFile = File(...)):
     try:
         raw = await file.read()
 
-        # Detect PDF by extension (cheap + reliable enough)
+        # Reject PDFs for now
         if file.filename.lower().endswith(".pdf"):
-            try:
-                images = convert_pdf_to_images(raw)    # <<— NEW robust conversion
-            except Exception as pdf_err:
-                # Return a clear 500 with explanation — your UI already handles 500s
-                return JSONResponse(
-                    status_code=500,
-                    content={
-                        "success": False,
-                        "error": str(pdf_err),
-                        "hint": "Make sure poppler-utils is installed and POPPLER_PATH is set (e.g. /usr/bin).",
-                    },
-                )
-        else:
-            # Image upload path (unchanged)
-            try:
-                images = [open_image_from_bytes(raw)]
-            except Exception as img_err:
-                return JSONResponse(
-                    status_code=400,
-                    content={"success": False, "error": f"Invalid image: {img_err}"},
-                )
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "error": "PDF uploads are not yet supported. Please upload a clear image (JPEG or PNG)."
+                },
+            )
 
-        # OCR all pages (unchanged logic)
-        text = ocr_images(images)
+        # Proceed with image OCR
+        try:
+            image = Image.open(io.BytesIO(raw)).convert("RGB")
+        except Exception as img_err:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": f"Invalid image format: {img_err}"}
+            )
 
-        # Your existing field extraction (unchanged)
+        text = pytesseract.image_to_string(image)
         extracted = extract_fields(text)
 
-        # Keep response shape to avoid breaking existing UI
-        return JSONResponse(content=extracted)
+        return JSONResponse(content={"success": True, "data": extracted})
 
     except Exception as e:
-        # Generic failure path (unchanged semantics)
         return JSONResponse(
             status_code=500,
-            content={"success": False, "error": f"OCR processing failed: {e}"},
+            content={"success": False, "error": f"OCR processing failed: {e}"}
         )
