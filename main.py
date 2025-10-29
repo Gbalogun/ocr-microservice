@@ -1,74 +1,89 @@
+import os
+import base64
+import traceback
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pdf2image import convert_from_bytes
-from PIL import Image
-import pytesseract
-import io, os, re
+from openai import OpenAI
 
-from utils_openai import extract_with_openai
+# ================================
+# ✅ INITIAL SETUP
+# ================================
 
 app = FastAPI()
 
-# Enable CORS
+# Allow frontend (Softgen / local) access
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Initialize OpenAI client
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# ================================
+# ✅ HEALTH CHECK ROUTE
+# ================================
+
 @app.get("/")
-def home():
-    return {"status": "ok", "message": "OCR microservice is running", "mode": os.getenv("OCR_MODE", "tesseract")}
+def health_check():
+    """Basic check to confirm the service is running."""
+    return {"status": "ok", "message": "OCR service active"}
 
-# -------------------------------------------------------------------
-# Fallback regex-based extraction (if using Tesseract)
-# -------------------------------------------------------------------
-def extract_fields_tesseract(text: str) -> dict:
-    vrm_match = re.search(r"\b[A-Z]{2}[0-9]{2}[A-Z]{3}\b", text)
-    date_match = re.search(r"\b(\d{2}/\d{2}/\d{4})\b", text)
-    contravention_code_match = re.search(r"\b\d{2}[A-Z]?\b", text)
-    fine_amounts = re.findall(r"£\s?\d+(?:\.\d{2})?", text)
-    discounted, full = None, None
-    if fine_amounts:
-        if len(fine_amounts) == 1:
-            full = fine_amounts[0]
-        else:
-            discounted, full = sorted(fine_amounts, key=lambda x: float(x.replace("£", "")))
+# ================================
+# ✅ OCR EXTRACTION ENDPOINT
+# ================================
 
-    return {
-        "vrm": vrm_match.group(0) if vrm_match else None,
-        "contravention_date": date_match.group(0) if date_match else None,
-        "contravention_code": contravention_code_match.group(0) if contravention_code_match else None,
-        "fine_amount_discounted": discounted,
-        "fine_amount_full": full,
-    }
-
-# -------------------------------------------------------------------
-# Main /ocr route
-# -------------------------------------------------------------------
 @app.post("/ocr")
-async def ocr_extract(file: UploadFile = File(...)):
+async def extract_pcn_data(file: UploadFile = File(...)):
+    """
+    Accepts a PDF or image file, sends it to OpenAI Vision (gpt-4o-mini),
+    and extracts structured PCN data.
+    """
     try:
-        content = await file.read()
-        mode = os.getenv("OCR_MODE", "tesseract").lower()
+        # Read and encode uploaded file
+        file_bytes = await file.read()
+        encoded = base64.b64encode(file_bytes).decode("utf-8")
 
-        # If using OpenAI (preferred)
-        if mode == "openai":
-            return await extract_with_openai(content, file.filename)
+        # Define clear extraction prompt
+        prompt = (
+            "Extract the following information from this penalty charge notice (PCN):\n"
+            " - VRM (vehicle registration number)\n"
+            " - Contravention date (DD/MM/YYYY)\n"
+            " - Location\n"
+            " - Issuing authority\n"
+            " - Fine amount (include £ sign if present)\n"
+            " - PCN number / reference\n"
+            " - Reason for fine\n\n"
+            "Return only valid JSON with these exact keys:\n"
+            "vrm, contravention_date, location, authority, fine_amount, pcn_number, reason."
+        )
 
-        # Default to Tesseract OCR
-        if file.filename.lower().endswith(".pdf"):
-            images = convert_from_bytes(content)
-        else:
-            images = [Image.open(io.BytesIO(content))]
+        # Call OpenAI Vision API
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that extracts PCN data from documents."},
+                {"role": "user", "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:application/pdf;base64,{encoded}"}}
+                ]},
+            ],
+            temperature=0.2,
+        )
 
-        text = "".join(pytesseract.image_to_string(img) for img in images)
-        extracted = extract_fields_tesseract(text)
+        # Parse the response
+        result_text = response.choices[0].message.content.strip()
 
-        return JSONResponse(content={"extracted": extracted, "engine": "tesseract"})
+        # Return structured response
+        return {"success": True, "message": "Data extracted successfully", "data": result_text}
 
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        # Log detailed error to console for debugging (visible in Render logs)
+        print("❌ OCR extraction error:", e)
+        traceback.print_exc()
+
+        # Return a safe JSON error message
+        return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
