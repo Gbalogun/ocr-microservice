@@ -1,184 +1,156 @@
-import io
-import re
-from typing import List
+# ===============================
+# 🚀 Hybrid OCR Microservice (OpenAI + Tesseract)
+# ===============================
+
 from fastapi import FastAPI, File, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from openai import OpenAI
 from PIL import Image
 import pytesseract
+import io, os, base64, re
+from dotenv import load_dotenv
 
+load_dotenv()
 
-app = FastAPI(
-    title="Auto Nominate OCR Microservice",
-    description="Extracts PCN details (VRM, fine, date, authority, etc.) from uploaded images.",
-    version="1.0.0"
-)
+app = FastAPI()
 
-# CORS (allow Softgen frontend or other origins)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # or replace * with your frontend URL
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Initialize OpenAI client
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-
-# ───────────────────────────────
-# FIELD EXTRACTION LOGIC
-# ───────────────────────────────
-CONTRAVENTION_TYPES = {
-    "01": "Parking in a restricted area",
-    "02": "Overstaying in parking bay",
-    "03": "No valid parking ticket",
-    "04": "Parking without payment",
-    "05": "Parking without payment",
-    "06": "Parking without payment",
-    "12": "Parking in disabled bay",
-    "16": "Loading in restricted hours",
-    "23": "Bus lane violation",
-}
-
-
+# -------------------------------
+# Helper Function: Field Extraction (for Tesseract fallback)
+# -------------------------------
 def extract_fields(text: str) -> dict:
-    """Extract relevant PCN fields from OCR text."""
+    """Extract common PCN fields from OCR text."""
     lines = text.splitlines()
     data = {
         "pcn_number": None,
         "vrm": None,
         "contravention_date": None,
-        "contravention_code": None,
-        "contravention_type": None,
+        "due_date": None,
+        "fine_amount_full": None,
+        "fine_amount_discounted": None,
         "location": None,
         "authority": None,
-        "fine_amount_discounted": None,
-        "fine_amount_full": None,
-        "due_date": None,
     }
 
-    for i, raw_line in enumerate(lines):
-        line = raw_line.strip()
-        if not line:
+    for line in lines:
+        lower_line = line.lower().strip()
+        if not lower_line:
             continue
-        lower_line = line.lower()
 
-        # PCN Number
-        if any(k in lower_line for k in ["pcn reference", "reference", "pcn number", "ref"]):
-            m = re.search(r"[A-Z0-9]{5,}", line)
+        # Reference Number / PCN
+        if "reference" in lower_line or "pcn" in lower_line:
+            m = re.search(r"[A-Z0-9]{6,}", line)
             if m:
                 data["pcn_number"] = m.group(0)
 
-        # VRM (vehicle registration mark)
-        if re.search(r"\b[A-Z]{2}[0-9]{2}[A-Z]{3}\b", line):
+        # VRM / Vehicle Registration
+        if "vehicle registration" in lower_line or "reg" in lower_line or "vrm" in lower_line:
             m = re.search(r"\b[A-Z]{2}[0-9]{2}[A-Z]{3}\b", line)
             if m:
                 data["vrm"] = m.group(0)
 
-        # Date
-        if any(k in lower_line for k in ["date", "issued", "issue", "offence", "contravention", "payment", "by"]):
+        # Dates (Contravention, Due)
+        if "date" in lower_line:
             m = re.search(r"\b\d{2}/\d{2}/\d{4}\b", line)
             if m:
-                if "payment" in lower_line or "by" in lower_line:
+                if "due" in lower_line:
                     data["due_date"] = m.group(0)
                 else:
                     data["contravention_date"] = m.group(0)
 
-        # Contravention code
-        if any(k in lower_line for k in ["contravention", "reason", "offence"]):
-            m = re.search(r"\b\d{2}[A-Z]?\b", line)
+        # Fine Amount
+        if "amount" in lower_line or "charge" in lower_line:
+            m = re.findall(r"£\s?(\d+(?:\.\d{2})?)", line)
             if m:
-                code = m.group(0)
-                data["contravention_code"] = code
-                data["contravention_type"] = CONTRAVENTION_TYPES.get(code)
+                values = [float(x) for x in m]
+                data["fine_amount_full"] = max(values)
+                if len(values) > 1:
+                    data["fine_amount_discounted"] = min(values)
 
         # Location
         if "location" in lower_line:
-            parts = line.split(":", 1)
-            data["location"] = parts[1].strip() if len(parts) == 2 else line.strip()
+            data["location"] = line.split(":", 1)[-1].strip()
 
         # Authority
-        if any(k in lower_line for k in ["authority", "council", "borough", "ltd", "limited", "parking company"]):
-            data["authority"] = line.strip()
-
-        # Fine amounts
-        if "£" in line:
-            amounts = re.findall(r"£\s?(\d+(?:\.\d{2})?)", line)
-            for a in amounts:
-                try:
-                    value = float(a)
-                except ValueError:
-                    continue
-                if any(tok in lower_line for tok in ["discount", "within 14", "reduced"]):
-                    data["fine_amount_discounted"] = value
-                else:
-                    current = data["fine_amount_full"] or 0
-                    data["fine_amount_full"] = max(current, value)
+        if "council" in lower_line or "limited" in lower_line or "parkmaven" in lower_line:
+            data["authority"] = "ParkMaven Limited"
 
     return data
 
-
-# ───────────────────────────────
-# ROUTES
-# ───────────────────────────────
-
-@app.get("/")
-def home():
-    return {"status": "ok", "message": "OCR microservice is running."}
-
-
-@app.get("/health")
-def health():
-    return {"ok": True}
-
-
+# -------------------------------
+# Main OCR Endpoint
+# -------------------------------
 @app.post("/ocr")
 async def ocr_extract(file: UploadFile = File(...)):
-    """
-    Extracts text data from an uploaded image (JPEG, PNG).
-    Rejects PDFs (for future support).
-    """
+    """Extracts key fields (VRM, fine, location, etc.) from uploaded PCN."""
+    image_bytes = await file.read()
+
+    # Convert image to base64 for OpenAI
+    encoded = base64.b64encode(image_bytes).decode("utf-8")
+
     try:
-        # Check file type
-        if file.filename.lower().endswith(".pdf"):
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "success": False,
-                    "error": "PDF uploads are not yet supported. Please upload a clear image (JPEG or PNG)."
+        # STEP 1: Try OpenAI Vision OCR
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an OCR parser that extracts structured data from PCN (Penalty Charge Notice) images. "
+                        "Return ONLY valid JSON with the following fields: "
+                        "{VRM, ReferenceNumber, FineAmount, DiscountedAmount, DateOfEvent, PaymentDue, Location, Authority}."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Extract data from this PCN image and respond only in JSON format."},
+                        {"type": "image_url", "image_url": f"data:image/jpeg;base64,{encoded}"}
+                    ]
                 }
-            )
+            ],
+            temperature=0
+        )
 
-        # Load image safely
-        raw = await file.read()
-        try:
-            image = Image.open(io.BytesIO(raw)).convert("RGB")
-        except Exception as img_err:
-            return JSONResponse(
-                status_code=400,
-                content={"success": False, "error": f"Invalid image format: {img_err}"}
-            )
+        text_output = response.choices[0].message.content
 
-        # Run OCR
-        text = pytesseract.image_to_string(image)
-
-        # Extract structured fields
-        extracted = extract_fields(text)
-
-        # Return results
         return JSONResponse(
-            status_code=200,
             content={
                 "success": True,
-                "message": "OCR extraction successful",
-                "data": extracted
+                "source": "openai",
+                "data": text_output
             }
         )
 
     except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "error": f"OCR processing failed: {e}"
-            }
-        )
+        # STEP 2: Fallback to Tesseract OCR
+        try:
+            image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+            text = pytesseract.image_to_string(image, config="--psm 6 --oem 3")
+            extracted = extract_fields(text)
+
+            return JSONResponse(
+                content={
+                    "success": True,
+                    "source": "tesseract",
+                    "data": extracted,
+                    "error": str(e)
+                }
+            )
+        except Exception as err:
+            return JSONResponse(
+                content={
+                    "success": False,
+                    "error": f"OCR failed: {str(err)}"
+                },
+                status_code=500
+            )
+
+# -------------------------------
+# Health Check Endpoint
+# -------------------------------
+@app.get("/health")
+def health():
+    return {"ok": True, "service": "Hybrid OCR (OpenAI + Tesseract)"}
